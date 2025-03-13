@@ -96,7 +96,6 @@ where
         arthur: &mut Arthur,
         ctx: &mut ParseProofContext<F, MerkleConfig::InnerDigest>,
     ) -> ProofResult<()> {
-        // TODO: does this have to happen before the other arthur calls?
         let next_root: [u8; 32] = arthur.next_bytes()?;
 
         // PHASE 2:
@@ -418,56 +417,65 @@ where
             // The evaluations of the previous committed function need to be reshaped into
             // evaluations of the virtual function f'
             let g_virtual_evals = &all_r_shift_virtual_evals[r_num];
-            let mut f_prime_virtual_evals = Vec::with_capacity(g_virtual_evals.len());
 
-            for (index, answer) in evaluation_indexes.into_iter().zip(g_virtual_evals) {
-                // Coset eval is the evaluations of the virtual function on the coset
-                let coset_offset_inv =
-                    domain_offset_invs[r_num] * domain_gen_invs[r_num].pow([*index as u64]); // What does this do?
-                let mut coset_evals = Vec::with_capacity(1 << self.params.folding_factor);
-                #[allow(clippy::needless_range_loop)]
-                for j in 0..1 << self.params.folding_factor {
-                    // TODO: Optimize
-                    // The evaluation poincs are the i + j * folded_domain_size elements of the
-                    // domain. for a domain whose represented by offset * <gen>,, this translates
-                    // to a domain
-                    let x = domain_offsets[r_num]
-                        * domain_gens[r_num]
-                            .pow([(index + j * (round.folded_domain_size / 2)) as u64]);
+            assert_eq!(evaluation_indexes.len(), g_virtual_evals.len());
+            let f_prime_virtual_evals: Vec<_> = evaluation_indexes
+                .into_iter()
+                .zip(g_virtual_evals)
+                .map(|(index, answer)| {
+                    // Coset eval is the evaluations of the virtual function on the coset
+                    let coset_offset_inv =
+                        domain_offset_invs[r_num] * domain_gen_invs[r_num].pow([*index as u64]); // What does this do?
 
-                    let numerator = answer[j] - ans_polynomial.evaluate(&x);
+                    assert_eq!(answer.len(), 1 << self.params.folding_factor);
+                    let coset_evals: Vec<_> = answer
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(j, ans)| {
+                            // TODO: Optimize
+                            // The evaluation points are the i + j * folded_domain_size elements of the
+                            // domain. for a domain whose represented by offset * <gen>, this translates
+                            // to a domain
+                            let x = domain_offsets[r_num]
+                                * domain_gens[r_num]
+                                    .pow([(index + j * (round.folded_domain_size / 2)) as u64]);
 
-                    // Just an eval of the vanishing polynomial
-                    let denominator: F = quotient_set.iter().map(|point| x - point).product();
-                    let denom_inv = denominator.inverse().unwrap();
+                            let numerator = ans - ans_polynomial.evaluate(&x);
 
-                    // Scaling factor:
-                    // If xr = 1 this is just the num_terms + 1
-                    // If xr != 1 this is (1 - (xr)^{num_terms + 1})/(1 - xr)
-                    let common_factor = x * r_comb;
+                            // Just an eval of the vanishing polynomial
+                            let denominator: F =
+                                quotient_set.iter().map(|point| x - point).product();
+                            let denom_inv = denominator.inverse().unwrap();
 
-                    let scale_factor = if common_factor != F::ONE {
-                        let common_factor_inverse = (F::ONE - common_factor).inverse().unwrap();
-                        (F::ONE - common_factor.pow([(num_terms + 1) as u64]))
-                            * common_factor_inverse
-                    } else {
-                        F::from((num_terms + 1) as u64)
-                    };
+                            // Scaling factor:
+                            // If xr = 1 this is just the num_terms + 1
+                            // If xr != 1 this is (1 - (xr)^{num_terms + 1})/(1 - xr)
+                            let common_factor = x * r_comb;
 
-                    coset_evals.push(scale_factor * numerator * denom_inv);
-                }
+                            let scale_factor = if common_factor != F::ONE {
+                                let common_factor_inverse =
+                                    (F::ONE - common_factor).inverse().unwrap();
+                                (F::ONE - common_factor.pow([(num_terms + 1) as u64]))
+                                    * common_factor_inverse
+                            } else {
+                                F::from((num_terms + 1) as u64)
+                            };
 
-                let f_prime_eval = compute_fold_univariate(
-                    &coset_evals,
-                    r_folds[r_num],
-                    coset_offset_inv,
-                    coset_gen_inv,
-                    self.two_inv,
-                    self.params.folding_factor,
-                );
+                            scale_factor * numerator * denom_inv
+                        })
+                        .collect();
 
-                f_prime_virtual_evals.push(f_prime_eval);
-            }
+                    compute_fold_univariate(
+                        &coset_evals,
+                        r_folds[r_num],
+                        coset_offset_inv,
+                        coset_gen_inv,
+                        self.two_inv,
+                        self.params.folding_factor,
+                    )
+                })
+                .collect();
 
             r_shift_evals = f_prime_virtual_evals;
         }
